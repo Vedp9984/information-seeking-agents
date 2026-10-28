@@ -1,0 +1,591 @@
+# Generalization Bottlenecks in Sequential Information-Seeking Agents: A Controlled Study Under Partial Observability
+
+An empirical study of what limits out-of-distribution generalization in a
+sequential information-acquisition agent. **Generalization scales with environment
+diversity, and additional model capacity helps only once that diversity is
+sufficient.** Across an 8× vocabulary sweep at fixed compute, disjoint win rate
+rises **58.28% → 73.96%**, a clean **+5.38pp per doubling** (R² = 0.964) that
+saturates toward an estimated ceiling near 80%. A 2×2 capacity × diversity grid
+then shows the two axes are not independent: 3× the parameters (19.2M → 57M)
+*costs* **1.02pp** at 180K words and *gains* **1.36pp** at 390K — a **+2.39pp
+interaction**, and a change of sign rather than of magnitude. The best model here,
+57M parameters at 390K words, reaches **75.33%** disjoint. Sample density, by
+contrast, controls memorization (±9pp of gap) rather than competence (±1pp of
+disjoint win rate): doubling the sampling of the same environments buys +0.03pp —
+12 words out of 45,060.
+
+---
+
+## Problem
+
+An agent observes a partially masked string and must recover it by querying one
+symbol at a time. Each query returns *every* position matching that symbol, or
+nothing; the agent is eliminated after 6 unsuccessful queries. This is sequential
+information acquisition under a hard budget: the latent state is never observed
+directly, each action is simultaneously an information probe and an irreversible
+expenditure, and the optimal policy must trade immediate payoff probability
+against expected information gain. Evaluation is adversarial to memorization — the
+agent is scored on 45,060 strings sharing **zero** vocabulary overlap with
+anything it trained on. Every number below is a pair, in-distribution and
+disjoint, because the *gap* between them is the only reliable memorization
+detector we found.
+
+## Problem structure
+
+Hangman is one instance of a general decision problem. Stripped of the game, the
+structure is:
+
+```
+          ┌──────────────────────────────────────────────────────────┐
+          │                                                          │
+   Agent ─┴─► observes PARTIAL state ─► takes a COSTLY action ─► receives FEEDBACK
+     ▲                                   (probe the hidden state;       │
+     │                                    spends part of a budget)      │
+     └──────────── updates BELIEF about the hidden state ◄──────────────┘
+
+     repeat until the hidden state is resolved or the BUDGET is exhausted
+```
+
+Four properties define the class: the latent state is never seen directly; each
+action is both an information probe and an irreversible spend; feedback is
+informative whether it is positive *or negative*; and the policy must trade
+immediate payoff probability against information gained for later decisions.
+
+| | Hangman (this study) | Recommendation / commerce agent |
+|---|---|---|
+| **Hidden state** | the target string | the user's preferences and intent |
+| **Partial observation** | revealed positions and the set of absent letters | interaction history so far: clicks, dwell, skips |
+| **Costly action** | guess a letter | show an item, notification or offer |
+| **Budget** | 6 wrong guesses | user attention: patience before they leave |
+| **Positive feedback** | letter present: every matching position revealed | click, purchase, long dwell |
+| **Negative feedback** | letter absent: a life is spent, and the letter is ruled out | skip, ignore, bounce |
+| **Belief update** | condition on pattern + eliminated set | condition on engaged and non-engaged items |
+| **Terminal** | word solved, or lives exhausted | goal reached (conversion, session value) or user churns |
+| **Generalization test** | strings with zero vocabulary overlap with training | new users and sparse segments unseen in training |
+
+The mapping is structural, not empirical: every measurement in this repository is
+on Hangman. The recommendation column is the interpretation the findings are
+offered for (see [Applications](#applications)), not something tested here.
+
+## Approach
+
+A character-level transformer trained as a masked language model, but conditioned
+on the full game state rather than the string alone. Two properties distinguish it
+from standard MLM:
+
+**Masking is letter-level, never position-level.** Revealing a symbol reveals all
+of its occurrences at once, so a state like `l_tter` is unreachable during play.
+81.3% of the vocabulary contains a repeated letter, so position-level masking
+places most training examples outside the reachable state space entirely.
+
+**The agent conditions on negative evidence.** The input carries a 26-dim vector
+of symbols queried and found absent. `_a__` with `e` untried and `_a__` with `e`
+ruled out are different states, and roughly half the information in a played game
+is negative.
+
+## Key finding
+
+**Out-of-distribution generalization scales with environment diversity — the
+number of distinct environments — and is nearly insensitive to how densely each
+environment is sampled.** Five training runs, identical in every respect except
+vocabulary size (19.2M per-position transformer, 128 states per word, exactly
+95,600 optimizer steps, effective batch 2048, same schedule and hardware, nested
+word subsets drawn from one distribution):
+
+![vocabulary scaling](figures/vocab_scaling.png)
+
+| training vocabulary | in-distribution | **disjoint** | gap |
+|---|---|---|---|
+| 50,000 | 59.65% | **58.28%** | 1.37pp |
+| 100,000 | 70.20% | **65.63%** | 4.57pp |
+| 180,000 | 77.53% | **70.66%** | 6.87pp |
+| 250,000 | 78.62% | **72.29%** | 6.33pp |
+| 390,204 | 79.45% | **73.96%** | 5.49pp |
+
+**+5.38 pp per doubling of vocabulary** (log-linear, R² = 0.964), but the curve
+is visibly saturating: per-doubling gains decay **+7.35 → +5.05 → +2.61pp**
+across the range. A saturating fit (`y = A − B·x^−c`) puts the ceiling at
+**≈ 80%**, about 6pp above the largest run. Another doubling to ~780K words
+should be worth +2–3pp, not +5.4 — the lever still works, but the cheap gains
+are behind us.
+
+### Isolating diversity from density
+
+The two are easy to confound, because enlarging a vocabulary at a fixed state
+budget also thins the sampling of each word. Two controlled comparisons separate
+them. Both hold vocabulary at 180,240 words and vary only states per word:
+
+| | states/word | in-distribution | **disjoint** | gap |
+|---|---|---|---|---|
+| dense | 277 | 85.34% | **69.66%** | **15.68pp** |
+| sparse | 128 | 77.53% | **70.66%** | **6.87pp** |
+
+Halving sample density **improves disjoint win rate by 1.04pp** while cutting
+in-distribution performance by 7.8pp and the memorization gap by 8.8pp. Doubling
+it in the other direction (50M → 100M states on the same words) moved disjoint by
+**+0.03pp — 12 words out of 45,060, statistically zero** — even though the second
+pool measurably reshaped the state distribution (opening states 14.7 → 26.4%,
+endgame 14.4 → 25.0%, corr(progress, budget) +0.003 → +0.432).
+
+So the two axes act on different quantities:
+
+- **Environment diversity → generalization.** +15.7pp of disjoint win rate
+  across an 8× vocabulary range.
+- **Sample density → memorization only.** It moves the gap by ~9pp and disjoint
+  win rate by ~1pp. Denser sampling of the same environments buys recall, not
+  competence.
+
+### Capacity and diversity interact
+
+**Capacity and diversity interact: additional parameters actively harm
+generalization when environment diversity is insufficient (−1.02pp), and help only
+once diversity exceeds a threshold (+1.36pp).** The mechanism is visible in the
+training dynamics — the 57M model at 180K vocabulary overfits from epoch 1, with
+validation loss rising monotonically, and its best checkpoint uses only 23% of the
+training budget.
+
+![capacity × diversity interaction](figures/capacity_interaction.png)
+
+Four runs, identical in every respect except parameter count and vocabulary size
+(128 states per word, exactly 95,600 optimizer steps, effective batch 2048, same
+schedule and hardware, same 45,060-word disjoint holdout, same
+best-val-win-rate checkpoint rule):
+
+| | 180K vocab | 390K vocab | capacity effect |
+|---|---|---|---|
+| **19.2M params** | 70.66% | 73.96% | — |
+| **57M params** | **69.64%** | **75.33%** | — |
+| **effect** | **−1.02pp** | **+1.36pp** | **interaction: +2.39pp** |
+
+Both effects are outside evaluation noise — 3.3σ and 4.7σ against an unpaired
+binomial standard error of ~0.30pp on 45,060 words. The sign flip, not the
+magnitude, is the result: there is no single "effect of capacity" to quote here
+without naming the diversity it was measured at.
+
+The training curves say why. At 390K words the 57M model improves for the whole
+budget (70.30 → 73.60 → 74.15 → 74.20% validation win rate) and its checkpoint
+comes from the final step. At 180K it peaks at **epoch 1 — step 22,050, 23% of the
+budget** — and then degrades for the remaining seven epochs while validation loss
+climbs monotonically from 0.2308 to 0.2446. The extra parameters find structure in
+390K environments and memorize 180K of them.
+
+Read the gap column with the caution from [below](#the-gap-is-not-a-generalization-score):
+57M @ 180K has the *narrowest* gap in the grid (5.33pp) and the *worst* disjoint
+score, because its in-distribution performance collapsed to 74.97% — below the
+19.2M model's 77.53%. It is the 50,000-word failure mode again, reached from the
+other direction.
+
+**Two caveats.** The four cells share an identical 95,600-step budget and an
+identical checkpoint-selection rule, but they do not reach their selected
+checkpoints at the same step (22,050 vs 88,200–95,600) — that disparity *is* the
+finding rather than a confound, but "equal compute" here describes the budget and
+the protocol, not the checkpoint. And this is one seed per cell: the standard
+errors above are evaluation-set noise only and say nothing about training-seed
+variance, which is unmeasured.
+
+### Full ablation grid
+
+Each row changes exactly one variable, at identical compute:
+
+| ablation | change | in-distribution | **disjoint** | gap |
+|---|---|---|---|---|
+| **Capacity** (180K words, 277 st/word) | 4.9M → 19.2M params | +10.60 | **+1.50** | 7.1 → 16.2pp |
+| **Capacity** (180K words, 128 st/word) | 19.2M → 57M params | −2.56 | **−1.02** | 6.9 → 5.3pp |
+| **Capacity** (390K words, 128 st/word) | 19.2M → 57M params | +5.40 | **+1.36** | 5.5 → 9.5pp |
+| **Sample density** | 50M → 100M states, same words | +0.36 | **+0.03** | 16.2 → 16.5pp |
+| **Sample density** | 277 → 128 states/word, same words | −7.81 | **+1.00** | 15.7 → 6.9pp |
+| **Inductive bias** | pooled head → per-position head | +0.66 | **+1.17** | 16.2 → 15.7pp |
+| **Environment diversity** | 50K → 390K words | +19.80 | **+15.68** | 1.4 → 5.5pp |
+
+Capacity is the instructive failure: at 180K words, 4× the parameters raises
+in-distribution performance 10.6pp and *more than doubles the memorization gap*,
+to buy 1.5pp of generalization. It is spent almost entirely on recall — and
+pushing further at that diversity turns the trade negative outright (−1.02pp).
+The same 3× step at 390K words instead buys +1.36pp, which is why the capacity
+rows cannot be collapsed into one number.
+
+### The gap is not a generalization score
+
+The 50,000-word run has the smallest gap in the study (1.37pp) and the worst
+generalization (58.28%). Its gap is small because in-distribution performance is
+only 59.65% — the model cannot fit even its own training set. A narrow gap means
+"not memorizing", which is only informative once in-distribution performance is
+high. Read alone it inverts the ranking; read alongside in-distribution
+performance it is the most reliable memorization detector we found.
+
+### The effect is specific to the learned model
+
+An n-gram backoff control over the same vocabulary sweep is flat — 55.32% →
+55.22% → 55.28% → 55.87% at 90K / 126K / 153K / 180K words, non-monotone and
+inside noise. A counting model extracts a fixed feature set per word and
+saturates; the neural model keeps finding structure in additional environments.
+Diversity scaling is a property of what is being learned, not of the data.
+
+## Applications
+
+These findings were measured on a string-recovery task. Below is how each maps onto
+sequential recommendation, using the [problem structure](#problem-structure) above.
+The mappings are hypotheses the results motivate; none has been tested on
+recommendation data.
+
+**A new user is a partially observed state.** Each interaction (swipe, click, skip)
+reveals something about preferences, the way a guessed letter reveals positions.
+The agent must pick what to show next so as to learn the most about the user while
+keeping them engaged: information-seeking under a budget, with attention span in
+place of lives. Hangman's tension between a likely hit and an informative probe is
+the same tension as showing a safe item versus one that resolves uncertainty.
+
+**Vocabulary scaling → user diversity.** Disjoint win rate rose +5.38pp per doubling
+of *distinct environments* and barely moved (+0.03pp) with denser sampling of the
+same ones. The analogue is: train on more diverse users, not more sessions per
+user. A model trained on 100K users × 50 sessions should be expected to generalize
+to new users better than one trained on 50K users × 100 sessions, which is the
+direct cold-start implication. Here the vocabulary sweep varied environments at a
+fixed state budget, so this is the matching prediction rather than a result.
+
+**Capacity × diversity.** Tripling parameters cost 1.02pp at 180K words and gained
+1.36pp at 390K. For recommenders: a larger model pays off only once there are
+enough distinct behavioral patterns. Below that, the extra capacity memorizes power
+users (high in-distribution accuracy, a narrower real gain) and fails on new or
+sparse ones. Watch the in-distribution/new-user gap, not either number alone.
+
+**DAgger failure → filter bubble.** On-policy retraining lowered disjoint win rate
+(67.00% → 65.42%) while in-vocab rose: training on the agent's own trajectories
+narrowed it to the states it already visits. A recommender retrained on its own
+logged interactions has the same shape, learning from what it chose to show, which
+narrows toward its own recommendations. Diverse exploration of the state space beat
+exploiting logged data for generalization to unseen segments.
+
+**Negative evidence is half the signal.** The model takes the set of letters
+queried and found absent as an explicit input, and roughly half the information in
+a played game is negative. Skipped items and ignored categories are the
+recommendation counterpart. They are often underweighted next to clicks; this
+architecture treats them as first-class input.
+
+## Architecture
+
+```
+pattern (29 tokens: a-z, blank, pad) ──► embedding + sinusoidal position ──┐
+                                                                           ├──► 6-layer
+eliminated set (26-dim) ──► Linear(26, d_model) ──► broadcast to positions ─┘    pre-LN
+                                                                                encoder
+                                                                                   │
+                                        ┌──────────────────────────────────────────┘
+                                        ▼
+                    per-position head: 26 logits at EVERY position
+                                        │
+                    aggregate:  P(present) = 1 − Π_blanks (1 − p_blank)
+                                        │
+                    mask already-queried symbols to −inf ──► argmax
+```
+
+- **Input:** masked pattern + eliminated set. The eliminated vector is projected
+  into model dimension and injected at every position, so each slot conditions on
+  negative evidence directly.
+- **Output:** 26-way multi-label, not softmax — several symbols are simultaneously
+  correct, and the multi-label form is what lets the model say so. Objective is BCE
+  on "is symbol L present and not yet revealed".
+- **Per-position head.** A pooled head predicts 26 numbers for the whole string,
+  which structurally forbids representing "slot 1 is probably `e`, slot 4 is
+  probably `o`". The per-position head gives 26 × n_blanks supervised values per
+  state instead of 26 — roughly 5× the gradient signal from identical data, which
+  is the lever that matters on a task measured to be data-limited. Worth +1.17pp
+  on its own; aggregation runs in log space to avoid underflow across up to 29
+  blanks.
+- **Training pipeline:** letter-level masking → 50M synthetic states (reveal count
+  uniform over distinct letters, wrong-query count uniform 0–5, wrong queries drawn
+  from genuinely absent symbols by frequency-weighted reservoir sampling) → stored
+  word-major as memory-mapped int8/uint32 → 8 invariants asserted before training.
+  Validation splits **by word, not by row**, since a row split puts states from one
+  word on both sides and reports a score inflated by memorization.
+- **Config:** 6 layers, d_model 512, 8 heads, FFN 2048, pre-LN, GELU, dropout
+  0.1, 19.2M parameters, fp16, ~8h on one RTX 2080 Ti.
+
+## Results
+
+45,060 disjoint strings, zero vocabulary overlap. `avg wrong` is over solved
+strings; `gap` is in-vocab minus disjoint.
+
+| model | in-vocab | **disjoint** | avg wrong | gap |
+|---|---|---|---|---|
+| fixed symbol order (control) | 10.5% | 10.0% | 4.08 | — |
+| frequency baseline | 13.5% | 13.8% | 3.98 | −0.3pp |
+| dictionary candidate filtering | 95.9% | 15.0% | 3.79 | **80.9pp** |
+| n-gram backoff, 12 two-sided templates | 60.35% | 55.59% | 3.077 | 4.8pp |
+| CatBoost, 26 per-symbol GBMs (2M states) | 62.99% | 57.55% | 2.962 | 5.4pp |
+| CatBoost tuned (4M states, 3000 iters) | 63.89% | 58.03% | 2.937 | 5.9pp |
+| transformer R0 (4.9M, pooled) | 74.09% | 67.00% | 2.400 | 7.1pp |
+| transformer A1 (19.2M, pooled) | 84.69% | 68.50% | 2.286 | 16.2pp |
+| transformer C1 (19.2M, 100M states) | 85.05% | 68.52% | 2.276 | 16.5pp |
+| transformer P1 (19.2M, per-position) | 85.34% | 69.66% | 2.245 | 15.7pp |
+| P1 + n-gram blend (w=0.60) | — | 70.17% | 2.264 | — |
+| transformer S180 (180K vocab, 128 states/word) | 77.53% | 70.66% | 2.23 | 6.9pp |
+| transformer S250 (250K vocab, per-position) | 78.62% | 72.29% | 2.20 | 6.3pp |
+| transformer V1 (19.2M, 390K vocab, per-position) | 79.45% | 73.96% | 2.165 | 5.5pp |
+| V1 + n-gram blend (w=0.75) | — | 74.12% | 2.175 | — |
+| transformer CAP57_180K (57M, 180K vocab) | 74.97% | 69.64% | 2.273 | 5.3pp |
+| **transformer CAP57_390K (57M, 390K vocab)** | 84.85% | **75.33%** | **2.115** | 9.5pp |
+
+### Negative results
+
+| experiment | result | diagnosis |
+|---|---|---|
+| **DAgger on-policy retraining** | 67.00% → **65.42%** | In-vocab rose 7.25pp while disjoint *fell* and the gap doubled. The on-policy pools were small (1.78M + 1.90M states) and tied to a fixed word list, replaying each state ~25× more often than a uniform one. Diversity beats distribution-match on an OOD task. |
+| **Depth-1 expectimax** | 67.00% → **43.03%**, then **21.88%** after fixing two real bugs | The "fix" being worse was the tell — the bugs were not the cause. The value function was fitted only on greedily-visited states (AUC 0.826 there) and then queried off-distribution; its importances (entropy 31.9 vs budget 11.6) made it prefer whichever query left the tidiest posterior, barely charging for the life spent. |
+| **2× distinct states (100M pool)** | 68.50% → **68.52%** | 12 words out of 45,060, and the gap got *wider*. Falsified the inference that "data-limited" meant state-limited. See the key finding. |
+| **Restoring a truncated budget (57M @ 390K)** | 75.30% → **75.33%** | The first 57M run stopped at 71,700 of 95,600 steps — an epoch count derived from micro-batch rather than optimizer steps, so any config with gradient accumulation silently under-ran its budget. Restoring the missing 33% of compute *and* the full LR anneal moved 12 words out of 45,060: the same statistical zero as the 100M-state pool. The model had already converged; its final epoch was worth +0.05pp. |
+| **Pretrained CANINE-s (133M)** | **64.25%** vs 69.66% from scratch (per-position, same vocabulary) | Plateaued after ~30M states, ~15% of what the from-scratch model consumed. An LR sweep (2e-4 vs 5e-4) moved 0.3pp, confirming the bottleneck was data volume, not optimization. |
+| **CatBoost, 26 per-symbol GBMs** | capped at **58.03%** | 2M→4M states and 500→3000 iterations bought +0.48pp for 3.5× the training time. A ceiling, not a tuning problem. |
+| **Probability renormalization in the blend** | below raw blending at every matched weight | Both components estimate the same quantity on a common scale; normalizing discards the absolute confidence that made them combinable. |
+| **Confidence routing** | −1.35pp at 8.9% routed, −5.52pp at 49.1% routed | Degraded monotonically with traffic handed to the n-gram. Low model confidence marks a genuinely hard state, not one where the weaker model knows better. |
+
+The blend sweep is monotone from w=1.00 (69.66%) to w=0.60 (70.17%), but the last
+increments — +0.09, +0.06, +0.02pp — are 9, 27 and 1 words against an unpaired
+standard error of ~0.22pp. The trend and the ~+0.5pp total are real; the exact
+optimum is not identifiable at this resolution.
+
+## Decision strategy analysis
+
+Three inference-time experiments on the frozen best model, with no retraining: the
+policy that turns the model's P(letter present) into a query is varied, the model
+is not. All run on the full 45,060-word disjoint split
+([run_decision_strategies.py](run_decision_strategies.py),
+[analyze_decision_strategies.py](analyze_decision_strategies.py); per-word
+outcomes in `results/decision/`, not tracked).
+
+**Checkpoint.** These use the 57M @ 390K run that stopped at 71,700 of 95,600
+steps (**75.30%** greedy), not the 95,600-step checkpoint behind the headline
+75.33%, which is no longer on the cluster. The README already shows the two are
+12 words apart ([truncated-budget row](#negative-results)); the baseline below
+is re-measured on this checkpoint, so every comparison is like for like. Greedy
+through the new simulator matches the repo's reference simulator exactly.
+
+**Difficulty bins, and what they actually measure.** The bins are by number of
+unique letters, as specified: easy ≤5 (n=7,845), medium 6–7 (n=15,986), hard
+8+ (n=21,229). For *this model* the names run backwards: greedy wins 38.1% of
+the ≤5 bin, 70.3% of 6–7 and 92.8% of 8+. Few unique letters means a short
+word, and short words are the ones with the least context to disambiguate them. The
+labels are kept for comparability, but read "hard" as "long, many distinct
+letters, well-predicted by the model" and "easy" as "short, least predictable".
+
+### Thompson sampling (contextual-bandit letter selection)
+
+At each step, for every unguessed letter draw q ~ Beta(P·k, (1−P)·k) and query the
+argmax. High k concentrates the draw on P, so k → ∞ is greedy.
+
+| k | win rate | Δ vs greedy (pp) | avg wrong | ≤5 unique | 6–7 | 8+ |
+|---|---|---|---|---|---|---|
+| greedy | 75.30% | — | 3.081 | 38.06 | 70.35 | 92.79 |
+| 1 | 66.80% | -8.50 | 3.635 | 25.01 | 57.69 | 89.10 |
+| 2 | 68.16% | -7.14 | 3.550 | 26.78 | 59.80 | 89.75 |
+| 5 | 71.19% | -4.11 | 3.383 | 31.13 | 64.26 | 91.21 |
+| 10 | 72.86% | -2.44 | 3.270 | 33.54 | 66.71 | 92.02 |
+| 50 | 74.57% | -0.73 | 3.140 | 36.32 | 69.51 | 92.52 |
+| 100 | 74.95% | -0.35 | 3.105 | 37.50 | 69.92 | 92.58 |
+
+(Sweep is seed 0; the best k is chosen on that same seed, so its gap to greedy
+is, if anything, optimistic.) Three seeds at k=100: **75.01% ± 0.05**
+(seeds 74.95, 75.04, 75.05), by bin
+37.33 ± 0.43 / 70.11 ± 0.23 / 92.63 ± 0.05.
+
+**Controlled exploration does not help.** Win rate is monotone in k, so the best
+setting is the one closest to greedy, and it still sits 0.29pp below it.
+Against greedy at k=100, a seed flips on average 1147 words from lost to
+won and 1276 from won to lost, a net loss of 129. Exploration does
+move individual words; it just moves more of them the wrong way. By word length the
+deficit is concentrated where greedy is weakest: −0.54pp at length ≤6,
+−0.34pp at 7–9, −0.23pp at 10–12, and +0.04pp at 13+
+(n=6,741, noise-sized).
+
+*Recommendation reading.* This is the contextual-bandit setting: the posterior
+sampling step that makes Thompson sampling effective when beliefs are uncertain.
+Here the model's P is already a well-calibrated-enough ranking that perturbing it
+costs more than it explores. The caveat is structural: the Beta is centred on the
+model's marginal P(present) per letter, which is not a posterior over the
+hidden state's parameters, so this is Thompson sampling over *outputs*, not over
+model uncertainty. It would be a fairer test of the bandit idea with an ensemble
+or dropout posterior, which is not done here. In a recommender, where the reward
+signal is far noisier and the cost of one wasted action is far smaller than a
+life in Hangman, the balance can differ.
+
+### Cold-start curve
+
+![cold-start curve](figures/cold_start_curve.png)
+
+Greedy policy, one trace per game; hit rate is among games still playing at that
+guess, cumulative reveal is the mean fraction of each word's unique letters found
+(finished games carried forward), and decided is the share of games already won or
+lost.
+
+| guess | hit rate | letters revealed | game decided |
+|---|---|---|---|
+| 1 | 68.6% | 9.5% | 0.0% |
+| 2 | 67.0% | 18.7% | 0.0% |
+| 3 | 68.5% | 28.1% | 0.0% |
+| 4 | 70.5% | 37.7% | 0.1% |
+| 5 | 69.4% | 47.1% | 0.6% |
+| 6 | 68.0% | 56.2% | 2.5% |
+| 7 | 68.1% | 65.0% | 8.2% |
+| 8 | 68.4% | 73.2% | 20.7% |
+| 9 | 69.4% | 80.1% | 39.6% |
+| 10 | 70.9% | 85.3% | 61.8% |
+| 11 | 73.0% | 88.5% | 80.1% |
+| 12 | 75.0% | 90.1% | 91.8% |
+
+Information accrues at a steady ~9–10% of a word's distinct letters per guess for
+the first eight guesses, then flattens near 91% because lost games stop short. No game
+can be decided before the 4th–5th guess (a loss needs six misses, a win needs every
+distinct letter), so the first third of the game is pure information gathering;
+resolution then arrives in a burst between guesses 7 and 11 (8% → 80%).
+
+Read the flat hit-rate line with care. It sits at 67–70% for guesses 1–9 even as the
+state becomes better known, but it is conditioned on games still alive, and games
+that go badly drop out, so survivors are an increasingly selected set. It
+does not show that the model fails to improve with information, and these data
+cannot separate the two.
+
+*Recommendation reading.* This is the shape of the new-user problem: a
+deterministic information-gathering phase before any outcome is decided, then a
+rapid resolution. The measure is per-guess within one episode, not across users
+or sessions, so it is the within-session analogue of cold-start, not a measurement of it.
+
+### Epsilon-greedy exploration
+
+With probability ε, query a uniformly random unguessed letter instead of the argmax.
+Mean ± std over 3 seeds (ε=0 is deterministic, one run); win rate %.
+
+| ε | overall | ≤5 unique (n=7,845) | 6–7 (n=15,986) | 8+ (n=21,229) |
+|---|---|---|---|---|
+| 0.0 | 75.30 ± 0.00 | 38.06 ± 0.00 | 70.35 ± 0.00 | 92.79 ± 0.00 |
+| 0.02 | 74.29 ± 0.07 | 37.11 ± 0.10 | 68.90 ± 0.08 | 92.08 ± 0.06 |
+| 0.05 | 72.80 ± 0.11 | 35.73 ± 0.19 | 67.04 ± 0.17 | 90.84 ± 0.11 |
+| 0.1 | 69.77 ± 0.10 | 33.16 ± 0.21 | 63.18 ± 0.16 | 88.27 ± 0.06 |
+| 0.15 | 66.17 ± 0.22 | 30.86 ± 0.48 | 58.82 ± 0.37 | 84.75 ± 0.13 |
+| 0.2 | 61.93 ± 0.18 | 28.37 ± 0.44 | 54.28 ± 0.48 | 80.09 ± 0.24 |
+
+![epsilon by difficulty](figures/epsilon_by_difficulty.png)
+
+**Exploration hurts monotonically, in every bin, from the first step:** −0.95/−1.45/−0.71pp at ε=0.02, and
+−9.7/−16.1/−12.7pp at ε=0.2. Seed-to-seed std is ≤0.5pp, so every
+step is many standard deviations. There is no differential benefit on the hard bin: in
+absolute points the 8+ bin loses more than the ≤5 bin once ε ≥ 0.15, and the
+medium bin loses the most throughout. In relative terms the order inverts
+(the ≤5 bin loses 25% of its win rate at ε=0.2, the 8+ bin 14%), which
+mostly reflects the very different baselines. The hypothesis that exploration helps
+where the model is least certain is not supported at any ε tested. A random letter
+is a poor probe in a game with a hard life budget; one wasted guess is one sixth of
+the game.
+
+*Recommendation reading.* This is the explore–exploit trade-off in its crudest form.
+Here the exploration cost is high and certain (a miss spends a life, which the next
+decision cannot recover) and the payoff of the information is small because the
+model already extracts most of what a state offers. Where exploration is cheap, as
+with a single feed slot, or where the model is far less sure than this one, the
+optimum need not be zero. These results speak to the cost side only.
+
+**What was and was not tested.** One checkpoint, one seed of training, one game.
+The only stochasticity examined is the policy's own; the Beta centring on
+marginal P (above) limits what the Thompson result says about bandits generally.
+
+## Reproduce
+
+Place your training word list at `data/train.txt` (one word per line, lowercase
+a-z). No word list is distributed with this repository; the results above were
+measured on a 225,300-word list, split 80/20 by the first step below.
+
+```bash
+pip install -r requirements.txt
+
+# 1. 80/20 word split, seed 42, shuffled (fully disjoint holdout).
+#    Regenerates data/train_split.txt and data/holdout_split.txt deterministically.
+python src/split_data.py
+
+# 2. Expand the environment vocabulary. --external takes any general English
+#    word list (e.g. /usr/share/dict/words). Every --forbid word is asserted
+#    absent from the output before it is written.
+python build_augmented_vocab.py \
+    --base data/train_split.txt --external /usr/share/dict/words \
+    --forbid data/holdout_split.txt --out data/train_augmented.txt
+
+# 3. Generate 50M states with letter-level masking, then assert 8 invariants
+python src/generate_training_data.py \
+    --words data/train_augmented.txt --out data/states --n-states 50000000
+python src/validate_states.py --dir data/states
+
+# 4. Train (~8h on one RTX 2080 Ti)
+python train_transformer.py --states-dir data/states --positional \
+    --layers 6 --d-model 512 --nhead 8 --ff 2048 \
+    --batch-size 2048 --epochs 4 --out models/transformer_V1.pt
+
+# 5. Benchmark on both splits; reports in-vocab, disjoint and gap
+python run_transformer_benchmark.py \
+    --checkpoint models/transformer_V1.pt --positional
+```
+
+**Leakage.** A general English word list contains ~92% of the holdout, so step 2
+is where this study lives or dies. Separation is enforced four independent ways:
+the builder asserts disjointness before writing, state generation re-checks the
+generated pool's own word list, and the written vocabulary was verified after the
+fact to intersect the 45,060-word holdout in exactly **0** entries while covering
+all 180,240 original training words. If you substitute a different external list,
+re-run the assertions — do not assume.
+
+The ablations: capacity via `--d-model`/`--layers`; sample density via
+`--n-states` and `src/mixture_dataset.py`; inductive bias by dropping
+`--positional`; diversity via `build_vocab_subsets.py`, which draws *nested*
+subsets from one shuffled pool so each point differs in size alone.
+
+The 2×2 grid is the 19.2M configuration above (`--layers 6 --d-model 512 --nhead 8
+--ff 2048`) and a 57M one (`--layers 8 --d-model 768 --nhead 12 --ff 3072`), each
+trained on `vocab_180k.txt` and on `data/train_augmented.txt`. The 57M model does
+not fit a 2048 micro-batch on an 11GB card, so it runs `--batch-size 1024
+--grad-accum 2` to hold the effective batch at 2048. Budget is equalised with
+`--max-steps 95600`, and `--epochs` must be large enough for that cap to bind:
+epochs are `ceil(steps / (rows_per_epoch / (batch × accum)))` — computing them
+from the *micro*-batch instead silently trains for `1/accum` of the intended
+budget. `plot_capacity_interaction.py` redraws the figure and recomputes the
+interaction from `results/benchmark_*.json`.
+
+`run_decision_strategies.py` and `analyze_decision_strategies.py` rerun the
+[decision strategy analysis](#decision-strategy-analysis) on any positional checkpoint
+(`tests_decision_strategies.py` checks the policies and trace logging against a
+noisy oracle first; the Ada job is `slurm/decision_strategies.sbatch`).
+
+`run_model_comparison.py` gives pairwise error correlation (φ, both-lose, union,
+McNemar) between two models; `run_paired_test.py` runs McNemar on sub-point
+differences. All seeds fixed.
+
+## Layout
+
+`src/` holds the models: `transformer_positional.py` (per-position head,
+log-space aggregation) and `transformer_model.py` (pooled baseline, shared
+encoding, eliminated-set injection); `generate_training_data.py` (letter-level
+masking) and `validate_states.py` (8 invariants) build and check the state pools;
+`dataset.py` / `mixture_dataset.py` are the memmap loaders with the word-boundary
+split; `batch_sim.py` is the batched simulator, cross-checked against the scalar
+`benchmark.py`. The comparison branches live beside them — `ngram_model.py`,
+`catboost_model.py`, `expectimax.py` + `value_function.py`, `collect_onpolicy.py`
+— so every negative result above stays verifiable. Top-level `train_*.py` and
+`run_*.py` are the entry points.
+
+## Limitations
+
+The vocabulary scaling curve now has five points and a fitted ceiling near 80%,
+but that ceiling is an extrapolation from an 8× range: the largest run sits 6.1pp
+below it and nothing here tests past 390K words.
+
+The capacity × diversity interaction rests on four runs, one seed per cell. The
+standard errors quoted for it (~0.30pp) are evaluation-set noise on 45,060 words
+and do not cover training-seed variance, which is unmeasured — a replicate seed
+per cell is the obvious hardening step before the sign flip is leaned on hard. The
+interaction is also measured at exactly two capacities and two diversities, so
+"once diversity exceeds a threshold" names a direction, not a located threshold:
+nothing here says where between 180K and 390K words the sign changes. And the two
+57M cells reach their selected checkpoints at very different points in an
+identical budget (22,050 vs 95,600 steps); that gap is the finding rather than a
+confound, but it does mean "equal compute" describes the budget and the selection
+rule, not the checkpoint.
+
+25.3% of holdout strings are solved by *no* model built here, and nothing tried
+moved that figure. All results are one seed per configuration; differences under
+~0.5pp should be read as ties.
